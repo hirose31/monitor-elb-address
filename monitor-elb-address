@@ -3,6 +3,10 @@
 use strict;
 use warnings;
 
+use FindBin;
+use File::Spec;
+use local::lib File::Spec->catfile($FindBin::Bin, 'local');
+
 use Getopt::Long qw(:config posix_default no_ignore_case no_ignore_case_always);
 use Pod::Usage;
 use Data::Dumper;
@@ -227,10 +231,21 @@ __END__
 
 B<monitor-elb-address> - check IP addresses of ELB periodically and notifies us when changed
 
+=begin readme
+
+=head1 QUICKSTART
+
+    cpanm -l local --installdeps .
+    cp config-sample.pl config.pl
+    vi config.pl
+    ./monitor-elb-address -c ./config.pl
+
+=end readme
+
 =head1 SYNOPSIS
 
 B<monitor-elb-address>
-[B<-c> I<config_file>]
+B<-c> I<config_file>
 [B<-i> I<interval>]
 [B<-d> | B<--debug>]
 
