@@ -12,8 +12,8 @@ __monitor-elb-address__ - check IP addresses of ELB periodically and notifies us
 # SYNOPSIS
 
 __monitor-elb-address__
-__\-c__ _config\_file_
-\[__\-i__ _interval_\]
+__\-c__ config\_file
+\[__\-i__ interval\]
 \[__\-d__ | __\--debug__\]
 
 __monitor-elb-address__ __\-h__ | __\--help__ | __\-?__
@@ -26,11 +26,11 @@ This script checks IP addresses of ELB periodically and notifies us when changed
 
 # OPTIONS
 
-- __\-c__ _config\_file_, __\--config__ _config\_file_
+- __\-c__ config\_file, __\--config__ config\_file
 
     Specify a config file path. This option is mandatory.
 
-- __\-i__ _interval_, __\--interval__ _interval_
+- __\-i__ interval, __\--interval__ interval
 
     Specify monitoring loop interval time by seconds. Default is 60 (seconds).
 

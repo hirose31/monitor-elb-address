@@ -245,8 +245,8 @@ B<monitor-elb-address> - check IP addresses of ELB periodically and notifies us 
 =head1 SYNOPSIS
 
 B<monitor-elb-address>
-B<-c> I<config_file>
-[B<-i> I<interval>]
+B<-c> config_file
+[B<-i> interval]
 [B<-d> | B<--debug>]
 
 B<monitor-elb-address> B<-h> | B<--help> | B<-?>
@@ -261,11 +261,11 @@ This script checks IP addresses of ELB periodically and notifies us when changed
 
 =over 4
 
-=item B<-c> I<config_file>, B<--config> I<config_file>
+=item B<-c> config_file, B<--config> config_file
 
 Specify a config file path. This option is mandatory.
 
-=item B<-i> I<interval>, B<--interval> I<interval>
+=item B<-i> interval, B<--interval> interval
 
 Specify monitoring loop interval time by seconds. Default is 60 (seconds).
 
