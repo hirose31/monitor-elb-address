@@ -1,0 +1,280 @@
+#!/usr/bin/env perl
+
+use strict;
+use warnings;
+
+use Getopt::Long qw(:config posix_default no_ignore_case no_ignore_case_always);
+use Pod::Usage;
+use Data::Dumper;
+BEGIN {
+    sub p($) {
+        local $Data::Dumper::Indent    = 1;
+        local $Data::Dumper::Deepcopy  = 1;
+        local $Data::Dumper::Sortkeys  = 1;
+        local $Data::Dumper::Terse     = 1;
+        local $Data::Dumper::Useqq     = 1;
+        local $Data::Dumper::Quotekeys = 0;
+        my $d =  Dumper($_[0]);
+        print STDERR $d;
+    }
+}
+
+use Data::Validator;
+use Log::Minimal;
+use Carp;
+
+use Net::DNS;
+use Text::Diff;
+use Furl;
+use String::IRC;
+use IPC::Lock::WithTTL;
+
+my $Interval;
+my $Debug = 0;
+
+my $_UA;
+sub ua() {
+    $_UA ||= Furl->new( timeout => 5 );
+    return $_UA;
+}
+
+my $_CONFIG_FILE;
+my $_CONFIG;
+sub config() {
+    unless ($_CONFIG) {
+        my $config_file = $_CONFIG_FILE =~ m{^[./]}
+            ? $_CONFIG_FILE
+            : './' . $_CONFIG_FILE;
+        $_CONFIG = do "$config_file";
+
+        croak "$config_file: $@" if $@;
+        croak "$config_file: $!" unless defined $_CONFIG;
+        unless (ref($_CONFIG) eq 'HASH') {
+            croak "$config_file does not return HashRef.";
+        }
+    }
+    return $_CONFIG;
+}
+
+MAIN: {
+    my %arg;
+    GetOptions(
+        \%arg,
+        'config|c=s',
+        'interval|i=i',
+        'debug|d+' => \$Debug,
+        'help|h|?' => sub { pod2usage(-verbose=>1) },
+    ) or pod2usage();
+
+    $ENV{LM_DEBUG} = 1 if $Debug;
+
+    my $opt_rule = Data::Validator->new(
+        config   => { isa => 'Str' },
+        interval => { isa => 'Int', default => 60 },
+    )->with('NoThrow');
+    my $opt = $opt_rule->validate(%arg);
+    pod2usage(join("\n", map {$_->{message}} @{$opt_rule->clear_errors}))
+        if $opt_rule->has_errors;
+    debugf("opt: %s", ddf($opt));
+
+    $Interval = $opt->{interval};
+
+    debugf("Interval: %d", $Interval);
+
+    pod2usage("Cannot read config file: $opt->{config}")
+        unless -r $opt->{config};
+    $_CONFIG_FILE = $opt->{config};
+    debugf("config: %s", ddf(config));
+
+    my $resolver = Net::DNS::Resolver->new(
+        retry   => 3,
+        retrans => 1,
+    );
+
+    my %prev_ip;
+    my %cur_ip;
+
+    no warnings qw(redefine);
+    *Text::Diff::Unified::hunk_header = sub { "" };
+
+    if ($Debug >= 2) {
+        # for debugging
+        %prev_ip = map { $_ => ["192.0.2.1"] } @{ config->{dnsname} };
+    }
+
+    while (1) {
+        my @dnsname = @{ config->{dnsname} };
+
+        for my $dnsname (@dnsname) {
+            debugf("DNSName: %s", $dnsname);
+
+            if (my $answer = $resolver->query($dnsname, 'A')) {
+                for my $rr ($answer->answer) {
+                    if ($rr->type eq 'A') {
+                        my $ip = $rr->address;
+                        push @{ $cur_ip{$dnsname} }, $ip;
+                    } else {
+                        warnf("Not a expected type: [%s] %s", $dnsname, $rr->type);
+                    }
+                }
+            } else {
+                warnf("Failed to resolve: [%s] %s", $dnsname, $resolver->errorstring);
+                $cur_ip{$dnsname} = [ @{ $prev_ip{$dnsname} } ]; # deep copy
+            }
+        }
+
+        if ($Debug >= 2) {
+            debugf("prev");
+            p \%prev_ip;
+            debugf("cur");
+            p \%cur_ip;
+        }
+
+        for my $dnsname (sort keys %prev_ip) {
+            my $prev_str = stringify_ip(+( $dnsname => $prev_ip{$dnsname}));
+            my $cur_str  = stringify_ip(+( $dnsname => $cur_ip{$dnsname}));
+            debugf("%s: cur_ip=%s", $dnsname, $cur_str);
+            my $diff = diff \$prev_str, \$cur_str, { STYLE => "Unified", CONTEXT => 10 };
+            if ($diff) {
+                infof("changed   [%s]", $dnsname);
+                print $diff;
+                notify($diff, $dnsname);
+            } else {
+                infof("no change [%s]", $dnsname);
+            }
+        }
+
+        %prev_ip = %cur_ip;
+        %cur_ip  = ();
+
+        sleep $Interval;
+    }
+
+    exit 0;
+}
+
+sub stringify_ip {
+    my %ip = @_;
+    return "" unless @_;
+    my $str;
+
+    for my $dnsname (sort keys %ip) {
+        $str .= "$dnsname\n";
+        for my $ip (sort @{ $ip{$dnsname} }) {
+            $str .= "  $ip\n";
+        }
+    }
+
+    return $str;
+}
+
+sub notify {
+    my $diff = shift;
+    my $dnsname = shift;
+
+    my $lock = IPC::Lock::WithTTL->new(
+        file => "/tmp/mon-elb-addr.$dnsname",
+        ttl  => 1800,
+    );
+    my($r, $hb) = $lock->acquire;
+    unless ($r) {
+        warnf("Cannot get lock. Try after at %d", $hb->{expiration});
+        return;
+    }
+
+    my $conf;
+
+    ### ikachan
+    if (($conf = config->{notify}{ikachan})
+            && $conf->{url}
+            && $conf->{channel}
+        ) {
+        my $type = 'notice';
+
+        my $comment = 'IP Address of ELB has changed';
+        $comment = String::IRC->new($comment)->red->bold->stringify;
+
+        for my $message ($comment, split(/\n+/, $diff)) {
+            debugf("POST to %s, %s", $conf->{channel}, $message);
+
+            utf8::encode($message);
+
+            ua->post(
+                "$conf->{url}/${type}",
+                [],
+                [
+                    channel => $conf->{channel},
+                    message => $message,
+                ],
+            );
+        }
+
+    }
+
+    ### mail
+    if (($conf = config->{notify}{mail})
+            && $conf->{to}
+        ) {
+        warnf("Not implemented ><");
+    }
+
+    $lock->release;
+}
+
+__END__
+
+=head1 NAME
+
+B<monitor-elb-address> - check IP addresses of ELB periodically and notifies us when changed
+
+=head1 SYNOPSIS
+
+B<monitor-elb-address>
+[B<-c> I<config_file>]
+[B<-i> I<interval>]
+[B<-d> | B<--debug>]
+
+B<monitor-elb-address> B<-h> | B<--help> | B<-?>
+
+  $ monitor-elb-address -c ./config.pl
+
+=head1 DESCRIPTION
+
+This script checks IP addresses of ELB periodically and notifies us when changed.
+
+=head1 OPTIONS
+
+=over 4
+
+=item B<-c> I<config_file>, B<--config> I<config_file>
+
+Specify a config file path. This option is mandatory.
+
+=item B<-i> I<interval>, B<--interval> I<interval>
+
+Specify monitoring loop interval time by seconds. Default is 60 (seconds).
+
+=item B<-d>, B<--debug>
+
+increase debug level.
+-d -d more verbosely.
+
+=back
+
+=head1 AUTHOR
+
+HIROSE Masaaki E<lt>hirose31@gmail.comE<gt>
+
+=cut
+
+# for Emacsen
+# Local Variables:
+# mode: cperl
+# cperl-indent-level: 4
+# cperl-close-paren-offset: -4
+# cperl-indent-parens-as-block: t
+# indent-tabs-mode: nil
+# coding: utf-8
+# End:
+
+# vi: set ts=4 sw=4 sts=0 et ft=perl fenc=utf-8 :
