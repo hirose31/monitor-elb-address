@@ -32,6 +32,7 @@ use Text::Diff;
 use Furl;
 use String::IRC;
 use IPC::Lock::WithTTL;
+use JSON;
 
 my $Interval;
 my $Debug = 0;
@@ -220,6 +221,37 @@ sub notify {
             && $conf->{to}
         ) {
         warnf("Not implemented ><");
+    }
+
+    ### slack
+    if (($conf = config->{notify}{slack})
+            && $conf->{webhook_url}
+        ) {
+        my $comment = 'IP Address of ELB has changed';
+        my %additional_config = ();
+        for my $key (qw/username channel/) {
+            if ($conf->{$key}) {
+                $additional_config{$key} = $conf->{$key};
+            }
+        }
+        my %payload = (
+            text => $comment,
+            attachments => [
+                {
+                    "title" => "IP address diff of $dnsname",
+                    "text" => '```' . "\n" . $diff . '```',
+                    "mrkdwn_in" => ["text"],
+                }
+            ],
+            %additional_config,
+        );
+        ua->post(
+            $conf->{webhook_url},
+            [],
+            [
+                payload => JSON::encode_json(\%payload),
+            ],
+        );
     }
 
     $lock->release;
